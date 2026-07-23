@@ -35,6 +35,53 @@ static const double EPSREL_GAUSSIAN_FIT = 1e-8;
 */
 static const int QUADORDER = 7;  // N=7, i.e. 99 integration nodes
 
+/// cached values of sqrt(N+1) for the first few N
+const int NSQRT = 10;
+static const double SQRTNPLUS1[NSQRT] =
+    { 1., sqrt(2.), sqrt(3.), 2., sqrt(5.), sqrt(6.), sqrt(7.), sqrt(8.), sqrt(9.), sqrt(10.) };
+
+/// compute the array of Hermite polynomials up to and including degree nmax at the given point
+inline void hermiteArray(const int nmax, const double x,
+    /* pre-allocated output array of length nmax+1 */ double* result)
+{
+    // This is neither "probabilist's" nor "physicist's" definition of Hermite polynomials,
+    // but rather "astrophysicist's" (with a different normalization).
+    // dH_n/dx = \sqrt{2n} H_{n-1};
+    // \int_{-\infty}^\infty dx H_n(x) H_m(x) \exp(-x^2) / (2\pi) = \delta_{mn} / (2 \sqrt{\pi});
+    // \int_{-\infty}^\infty dx H_n(x) \exp(-x^2/2) / \sqrt{2\pi} = \sqrt{n!} / n!!  for even n.
+    result[0] = 1.;
+    if(nmax<1)
+        return;
+    result[1] = M_SQRT2 * x;
+    double sqrtn = 1.;
+    for(int n=1; n<nmax; n++) {
+        double sqrtnplus1 = n<NSQRT ? SQRTNPLUS1[n] : sqrt(n+1.);
+        result[n+1] = (M_SQRT2 * x * result[n] - sqrtn * result[n-1]) / sqrtnplus1;
+        sqrtn = sqrtnplus1;
+    }
+}
+
+/// compute the array of coefficients a_{n,k} for all Hermite polynomials up to degree nmax (inclusive)
+/// \f$  H_n(x) = \sum_{k=0}^n a_{n,k} x^k  \f$,  a_{n,k} = result[ (nmax+1) * n + k ]
+inline void hermiteCoefs(const int nmax,
+    /* pre-allocated output array of size (nmax+1)^2 */ double* result)
+{
+    std::fill(result, result + pow_2(nmax+1), 0);
+    result[0] = 1;
+    if(nmax<1)
+        return;
+    result[nmax+2] = M_SQRT2;
+    double sqrtn = 1.;
+    for(int n=1; n<nmax; n++) {
+        double sqrtnplus1 = n<NSQRT ? SQRTNPLUS1[n] : sqrt(n+1.);
+        for(int k=0; k<=n+1; k++)
+            result[(n+1) * (nmax+1) + k] = (
+                (k>0 ? M_SQRT2 * result[n * (nmax+1) + k-1] : 0) -
+                sqrtn * result[(n-1) * (nmax+1) + k] ) / sqrtnplus1;
+        sqrtn = sqrtnplus1;
+    }
+}
+
 
 /// helper class for computing the integrals of f(x) times 1,x,x^2, using scaled integration variable
 class MomentsIntegrand: public IFunctionNdim {
@@ -90,41 +137,19 @@ void computeClassicMoments(const BaseInterpolator1d& fnc, /*output*/ double mome
 }
 
 
-/// compute the array of Hermite polynomials up to and including degree nmax at the given point
-void hermiteArray(const int nmax, const double x, double* result)
-{
-    // This is neither "probabilist's" nor "physicist's" definition of Hermite polynomials,
-    // but rather "astrophysicist's" (with a different normalization).
-    // dH_n/dx = \sqrt{2n} H_{n-1};
-    // \int_{-\infty}^\infty dx H_n(x) H_m(x) \exp(-x^2) / (2\pi) = \delta_{mn} / (2 \sqrt{\pi});
-    // \int_{-\infty}^\infty dx H_n(x) \exp(-x^2/2) / \sqrt{2\pi} = \sqrt{n!} / n!!  for even n.
-    result[0] = 1.;
-    if(nmax<1)
-        return;
-    result[1] = M_SQRT2 * x;
-    static const double sqroots[8] =
-        { 1., sqrt(2.), sqrt(3.), 2., sqrt(5.), sqrt(6.), sqrt(7.), sqrt(8.) };
-    double sqrtn = 1.;
-    for(int n=1; n<nmax; n++) {
-        double sqrtnplus1 = n<8 ? sqroots[n] : sqrt(n+1.);
-        result[n+1] = (M_SQRT2 * x * result[n] - sqrtn * result[n-1]) / sqrtnplus1;
-        sqrtn = sqrtnplus1;
-    }
-}
-
-
 /// compute the coefficients of GH expansion for an arbitrary function f(x)
 std::vector<double> computeGaussHermiteMoments(const IFunction& fnc,
     unsigned int order, double ampl, double center, double width)
 {
-    std::vector<double> hpoly(order+1);   // temp.storage for Hermite polynomials
+    // temp.storage for Hermite polynomials
+    double* hpoly = static_cast<double*>(alloca((order+1) * sizeof(double)));
     std::vector<double> result(order+1);
     for(int p=0; p<=pow_2(QUADORDER); p++) {
         double y = p * (1./QUADORDER);    // equally-spaced points (only nonnegative half of real axis)
         double mult = M_SQRT2 * width / ampl / QUADORDER * exp(-0.5*y*y);
         double fp = fnc(center + width * y);
         double fm = p==0 ? 0. : fnc(center - width * y);  // fnc value at symmetrically negative point
-        hermiteArray(order, y, &hpoly[0]);
+        hermiteArray(order, y, hpoly);
         for(unsigned int m=0; m<=order; m++)
             result[m] += mult * (fp + /*odd/even*/ (m%2 ? -1 : 1) * fm) * hpoly[m];
     }
@@ -137,55 +162,57 @@ std::vector<double> computeGaussHermiteMoments(const IFunction& fnc,
     H_m(y)  are Hermite polynomials, y = (x-m)/s  is the scaled variable,
     m is the center, s is the width, and Xi is the amplidude of the base Gaussian.
     For obvious reasons, the integration is carried out separately in each segment of the grid
-    of the input interpolator, and since the product of H_m(y) f(x(y)) is a polynomial of degree
-    P = M + N  (where M is the order of GH expansion), the integral on each segment y_i..y_{i+1}
-    can be computed analytically, using the Gaussian.integrate() method that provides the integral
-    of the base Gaussian times y^p.
-    To decompose the polynomial  H_m(y) * f(y * s + m)  into monomials on each segment for each m,
-    we record its values at P+1 equally-spaced points on this segment, and then convert them into
-    \f$  \sum_{p=0}^P  c_p y^p  \f$  using the vandermonde function.
+    of the input interpolator. The input function is decomposed into monomials y^l (l=0..N),
+    and the product of H_m(y) f(x(y)) is a polynomial of degree P = M + N  (where M is the order
+    of GH expansion) with coefficients being products of monomial coefficients of f(y) and
+    the (known, fixed) monomial coefficients of H_m(y).
+    The integral of this polynomial on each segment is computed analytically, using
+    the Gaussian.integrate() method for each monomial term.
 */
 std::vector<double> computeGaussHermiteMoments(const BaseInterpolator1d& fnc,
     unsigned int order, double ampl, double center, double width)
 {
     const std::vector<double>& grid = fnc.xvalues();
     std::vector<double> result(order+1);
-    const Gaussian gaussian(1.0);        // unit Gaussian in scaled variable y
-    const int P = order + fnc.degree();  // max degree of monomials
+    const Gaussian gaussian(1.0);  // unit Gaussian in scaled variable y: G(y)=exp(-y^2/2)/sqrt(2*pi)
+    const int N = fnc.degree();    // max degree of monomials in the input function f(x)
+    const int P = order + N;       // max degree of monomials in the product of H_m(y) * f(x(y))
     const double mult = 2*M_SQRTPI / ampl * width;
+    // coefficients h_{m,k} of Hermite polynomials (0<=k<=m<=order; these do not depend on any inputs,
+    // but since the order of expansion is not known in advance, they need to be computed on the fly)
+    double* hcoefs = static_cast<double*>(alloca(pow_2(order+1) * sizeof(double)));
+    hermiteCoefs(order, hcoefs);
     // coordinates of equally-spaced points on the current grid segment (in the scaled variable y)
-    double* ynodes = static_cast<double*>(alloca((P+1) * sizeof(double)));
-    // values of  f(x(y)) * H_m(y)  for all these points and all m<=M Hermite polynomials
-    double* yvalues = static_cast<double*>(alloca((P+1) * (order+1) * sizeof(double)));
-    // values of all Hermite polynomials H_m(y), m<=M, at the current point y
-    double* hpoly = static_cast<double*>(alloca((order+1) * sizeof(double)));
-    // coefficients  c_m  of the decomposition of  f(x(y)) * H_m(y)  into monomials y^p
-    double* monomialCoefs = static_cast<double*>(alloca((P+1) * sizeof(double)));
-    // integrals of  exp(-y^2/2) * y^p  for all p<=P on the current grid segment
+    double* ynodes = static_cast<double*>(alloca((N+1) * sizeof(double)));
+    // values of  f(x(y))  at these points
+    double* yvalues = static_cast<double*>(alloca((N+1) * sizeof(double)));
+    // coefficients  c_l  of the decomposition of  f(x(y))  into monomials y^l
+    double* monomialCoefs = static_cast<double*>(alloca((N+1) * sizeof(double)));
+    // integrals of  G(y) * y^p  for all p<=P on the current grid segment
     double* monomialIntegrals = static_cast<double*>(alloca((P+1) * sizeof(double)));
     // integration is carried out separately on each grid segment of the input interpolator
     for(size_t i=0; i<grid.size()-1; i++) {
-        // first, loop over P+1 equally-spaced points on this grid segment, collecting
-        // the values of f(x) and all M+1 Hermite polynomials H_m at each point y_p, 0<=p<=P,
-        // as well as the integrals of  exp(-y^2/2) * y^p  over this segment.
-        for(int p=0; p<=P; p++) {
+        // loop over N+1 equally-spaced points on this grid segment, collecting the values of f(x)
+        for(int n=0; n<=N; n++) {
+            double x  = n==0 ? grid[i] : n==N ? grid[i+1] : (grid[i] * (N-n) + grid[i+1] * n) / N;
+            ynodes[n] = (x-center) / width;
+            yvalues[n]= fnc(x);
+        }
+        // decompose the function into monomials expressed in the scaled variable y
+        vandermonde(N, ynodes, yvalues, monomialCoefs);
+        // compute integrals of G(y) * y^p over this grid segment for all monomial degrees p<=P
+        for(int p=0; p<=P; p++)
             monomialIntegrals[p] = gaussian.integrate(
                 (grid[i] - center) / width, (grid[i+1] - center) / width, p);
-            double x  = grid[i] + (grid[i+1] - grid[i]) * (p+0.5) / (P+1);
-            ynodes[p] = (x-center) / width;
-            double fx = fnc(x);
-            hermiteArray(order, ynodes[p], /*output*/ hpoly);
-            for(unsigned int m=0; m<=order; m++)
-                yvalues[m * (P+1) + p] = fx * hpoly[m];
-        }
-        // second, loop over the M+1 Hermite polynomials, determining the coefficients c_m
+        // loop over the M+1 Hermite polynomials, determining the coefficients
         // of the decomposition of  f(x(y)) * H_m(y)  into monomials y^p on this grid segment,
         // and then collect the contribution of each monomial to the integral for h_m.
         for(unsigned int m=0; m<=order; m++) {
-            vandermonde(P, ynodes, yvalues + m * (P+1), /*output*/ monomialCoefs);
-            // finally
-            for(int p=0; p<=P; p++)
-                result[m] += mult * monomialCoefs[p] * monomialIntegrals[p];
+            double integ = 0;
+            for(unsigned int k=0; k<=m; k++)  // monomial terms in the Gauss-Hermite polynomial
+                for(int l=0; l<=N; l++)       // monomial terms in the input function
+                    integ += hcoefs[m * (order+1) + k] * monomialCoefs[l] * monomialIntegrals[k+l];
+            result[m] += mult * integ;
         }
     }
     return result;
@@ -194,7 +221,7 @@ std::vector<double> computeGaussHermiteMoments(const BaseInterpolator1d& fnc,
 
 /** compute the coefs of GH expansion for an array of B-spline basis functions of degree N.
     A function f(x) represented as a B-spline expansion with an array of amplitudes A_k
-    \f$  f(x) = \sum_{j=1}^J A_j B_j(x)  \f$,
+    \f$  f(x) = \sum_{j=0}^{J-1} A_j B_j(x)  \f$,
     where B_j(x) are N-th degree B-splines over some grid,
     has the Gauss-Hermite coefficients given by  \f$  h_m = C_{mj} A_j  \f$,
     where C_{mj} is the matrix returned by this routine.
@@ -207,57 +234,63 @@ Matrix<double> computeGaussHermiteMatrix(const BsplineInterpolator1d<N>& interp,
     unsigned int order, double ampl, double center, double width)
 {
     const std::vector<double>& grid = interp.xvalues();
-    const int numBsplines = interp.numValues();
+    const int numBsplines = interp.numValues();  // = J
     Matrix<double> result(order+1, numBsplines, 0.);
     double* dresult = result.data();  // shortcut for raw matrix storage
     double bspl[N+1];                 // temp.storage for B-splines
-    const Gaussian gaussian(1.0);     // unit Gaussian in scaled variable y
+    const Gaussian gaussian(1.0);     // unit Gaussian in scaled variable y: G(y)=exp(-y^2/2)/sqrt(2*pi)
     const int P = order + N;          // max degree of monomials
     const double mult = 2*M_SQRTPI / ampl * width;
+    // coefficients h_{m,k} of Hermite polynomials (0<=k<=m<=order; these do not depend on any inputs,
+    // but since the order of expansion is not known in advance, they need to be computed on the fly)
+    double* hcoefs = static_cast<double*>(alloca(pow_2(order+1) * sizeof(double)));
+    hermiteCoefs(order, hcoefs);
     // coordinates of equally-spaced points on the current grid segment (in the scaled variable y)
-    double* ynodes = static_cast<double*>(alloca((P+1) * sizeof(double)));
-    // values of  H_m(y) * B_j(x(y))  for all these points, all m<=M Hermite polynomials
-    // and all b<=N nonzero B-spline basis functions
-    double* yvalues = static_cast<double*>(alloca((P+1) * (order+1) * (N+1) * sizeof(double)));
-    // values of all Hermite polynomials H_m(y), m<=M, at the current point y
-    double* hpoly = static_cast<double*>(alloca((order+1) * sizeof(double)));
-    // coefficients  c_m  of the decomposition of  B_b(x(y)) * H_m(y)  into monomials y^p
-    double* monomialCoefs = static_cast<double*>(alloca((P+1) * sizeof(double)));
-    // integrals of  exp(-y^2/2) * y^p  for all p<=P on the current grid segment
+    double* ynodes = static_cast<double*>(alloca((N+1) * sizeof(double)));
+    // values of each B-spline basis function B_b(y_n) at each point in the above array
+    double* yvalues = static_cast<double*>(alloca(pow_2(N+1) * sizeof(double)));
+    // coefficients c_l  of the decomposition of  B_b(x(y))  into monomials y^l  (one B_b at a time)
+    double* monomialCoefs = static_cast<double*>(alloca((N+1) * sizeof(double)));
+    // integrals of  G(y) * y^p  for all p<=P on the current grid segment
     double* monomialIntegrals = static_cast<double*>(alloca((P+1) * sizeof(double)));
     // integration is carried out separately on each grid segment of the input B-spline interpolator
     for(size_t i=0; i<grid.size()-1; i++) {
-        unsigned int leftInd = i;  // index of the first nonzero B-spline basis function on this segment
-        // first, loop over P+1 equally-spaced points y_p on this grid segment, collecting
-        // the values of all N+1 B-spline basis functions and all M+1 Hermite polynomials H_m,
-        // as well as the integrals of  exp(-y^2/2) * y^p  over this segment.
-        for(int p=0; p<=P; p++) {
-            // integrals of exp(-y^2/2) * y^p over this grid segment for all monomial degrees p<=P
+        // loop over N+1 equally-spaced points y_n on this grid segment,
+        // collecting the values of all N+1 B-spline basis functions at each point
+        for(int n=0; n<=N; n++) {
+            double x  = n==0 ? grid[i] : n==N ? grid[i+1] : (grid[i] * (N-n) + grid[i+1] * n) / N;
+            ynodes[n] = (x-center) / width;
+            // evaluate all N+1 possibly non-zero B-spline basis functions B_b(x(y)) at this point y_n:
+            // leftInd can be i or i+1 (only for the last point n=N);
+            // for this last point, the value of B_0(x_n)=0, and the routine nonzeroComponents
+            // returns the values of basis functions on the next grid segment, whose indices
+            // are shifted by one, i.e. bspl[0] = B_1(x_n), ..., bspl[b] = B_{b+1}(x_n) = 0 (ignored).
+            int leftInd = interp.nonzeroComponents(x, /*derivOrder*/0, /*output*/ bspl);
+            // reorder the output so that the values of each basis function are stored contiguously
+            for(int b=0; b<=N; b++)
+                yvalues[b * (N+1) + n] = (b + (int)i >= leftInd ? bspl[b + i-leftInd] : 0);
+        }
+        // compute integrals of G(y) * y^p over this grid segment for all monomial degrees p<=P
+        for(int p=0; p<=P; p++)
             monomialIntegrals[p] = gaussian.integrate(
                 (grid[i] - center) / width, (grid[i+1] - center) / width, p);
-            double x  = grid[i] + (grid[i+1] - grid[i]) * (p+0.5) / (P+1);
-            ynodes[p] = (x-center) / width;
-            // evaluate all N+1 possibly non-zero B-spline basis functions B_b(x(y)) at this point y_p
-            leftInd = interp.nonzeroComponents(x, /*derivOrder*/0, /*output*/ bspl);
-            // evaluate all M+1 Hermite polynomials at this point y_p
-            hermiteArray(order, ynodes[p], hpoly);
-            // store the products of all combinations of B-spline basis functions and Hermite polynomials
-            for(unsigned int m=0; m<=order; m++)
-                for(int b=0; b<=N; b++)
-                    yvalues[(m * (N+1) + b) * (P+1) + p] = bspl[b] * hpoly[m];
-        }
-        // second, loop over the M+1 Hermite polynomials and N+1 B-spline basis functions,
-        // determining the coefficients c_m of the decomposition of  B_b(x(y)) * H_m(y)
-        // into monomials y^p on this grid segment, and then collect the contribution of
-        // each monomial to the integral for H_m(x) * B_j(x), where the index j = leftInd + b
-        // and  0<=b<=N  enumerates all nonzero B-spline basis functions on this segment.
-        for(unsigned int m=0; m<=order; m++) {
-            for(int b=0; b<=N; b++) {
-                vandermonde(P, ynodes, yvalues + (m * (N+1) + b) * (P+1), /*output*/ monomialCoefs);
-                for(int p=0; p<=P; p++)
-                    //result(m, b+leftInd) = ...
-                    dresult[ m * numBsplines + b + leftInd ] +=
-                        mult * monomialCoefs[p] * monomialIntegrals[p];
+        // loop over all nonzero B-spline basis functions on this (i'th) segment;
+        // the overall index of the basis function is j = b + i; 0 <= j < numBsplines
+        for(int b=0; b<=N; b++) {
+            // decompose the b'th B-spline basis function on this segment into monomials:
+            // B_b(y) = \sum_{l=0}^N  c_l y^l
+            vandermonde(N, ynodes, yvalues + b * (N+1), monomialCoefs);
+            // loop over Hermite polynomials; each term  H_m(y) = \sum_{k=0}^m  h_{m,k} y^k,
+            // and the product of H_m(y) * B_b(y) is a polynomial of degree  P = order + N,
+            // whose coefficients are a sum of products of the coefficients c_l and h_{m,k}, and
+            // the integrals of each monomial term weighted by the base Gaussian were computed earlier
+            for(unsigned int m=0; m<=order; m++) {
+                double integ = 0;
+                for(unsigned int k=0; k<=m; k++)  // monomial terms in the Gauss-Hermite polynomial
+                    for(int l=0; l<=N; l++)       // monomial terms in the B-spline basis function
+                        integ += hcoefs[m * (order+1) + k] * monomialCoefs[l] * monomialIntegrals[k+l];
+                //result(m, b+i) = ...
+                dresult[ m * numBsplines + b + i ] += mult * integ;
             }
         }
     }
@@ -340,13 +373,15 @@ public:
         const std::vector<double>& origGrid = fnc.xvalues();
         grid.resize(origGrid.size());
         fncValues.resize((origGrid.size()-1) * (N+1));
-        for(size_t i=0; i<origGrid.size(); i++) {
+        for(size_t i=0; i+1<origGrid.size(); i++) {
             grid[i] = origGrid[i] / s0;
-            if(i == origGrid.size()-1) continue;
-            for(int n=0; n<=N; n++)
-                fncValues[i * (N+1) + n] =
-                    fnc(origGrid[i] + (origGrid[i+1] - origGrid[i]) * (n+0.5) / (N+1)) / a0 * s0;
+            for(int n=0; n<=N; n++) {
+                double x = n==0 ? origGrid[i] : n==N ? origGrid[i+1] :
+                    (origGrid[i] * (N-n) + origGrid[i+1] * n) / N;
+                fncValues[i * (N+1) + n] = fnc(x) / a0 * s0;
+            }
         }
+        grid.back() = origGrid.back() / s0;
     }
 
     /// computes the integral E, and optionally its first and second derivatives w.r.t. a,m,s.
@@ -391,7 +426,7 @@ public:
                 gaussianIntegrals[p] = gaussian.integrate(yleft, yright, p);
             // decompose the input function into the sum of monomial terms in y on this segment
             for(int n=0; n<=N; n++)
-                ynodes[n] = yleft + (yright - yleft) * (n+0.5) / (N+1);
+                ynodes[n] = n==0 ? yleft : n==N ? yright : (yleft * (N-n) + yright * n) / N;
             vandermonde(N, ynodes, &(fncValues[i * (N+1)]), /*output*/ monomialCoefs);
             // add the contribution of each monomial term to the total integral and its derivatives
             for(int n=0; n<=N; n++) {
@@ -518,7 +553,7 @@ GaussHermiteExpansion::GaussHermiteExpansion(const BaseInterpolator1d& fnc,
         std::vector<double> correction = SVDecomp(derivs2).solve(derivs);
         for(int i=0; i<=2; i++)
             params[i] -= correction[i];
-         fitter.evalDeriv(&params[0], NULL, &derivs[0]);  // should now be zero to machine precision
+        // fitter.evalDeriv(&params[0], NULL, &derivs[0]);  // should now be zero to machine precision
 
         // renormalize back the fitted parameters
         Ampl   = params[0] * a0;

@@ -130,9 +130,17 @@ def runGyrfalcon():
 def runArepoOrGadget(code):
     import os, platform, subprocess, zipfile, shutil, multiprocessing
     if sys.version_info.major == 2:
-        from urllib import urlretrieve
+        import urllib
+        class MyURLopener(urllib.FancyURLopener):
+            version = 'Mozilla/5.0'  # change user-agent to avoid a ban
+        urllib._urlopener = MyURLopener()
+        urlretrieve = urllib.urlretrieve
     else:
-        from urllib.request import urlretrieve
+        import urllib.request
+        def urlretrieve(url, filename):
+            with urllib.request.urlopen(urllib.request.Request(url,
+                headers={'User-Agent': 'Mozilla/5.0'})) as u, open(filename, 'wb') as f:
+                f.write(u.read())
     path = code
     if os.path.isdir(path):
         print('*** Using the existing installation of %s' % code)
@@ -146,6 +154,9 @@ def runArepoOrGadget(code):
         elif code == 'gadget4':
             url = 'https://gitlab.mpcdf.mpg.de/vrs/gadget4/-/archive/1e171a4a679d30ac1e6accabe8a76a037ccbacac/gadget4-1e171a4a679d30ac1e6accabe8a76a037ccbacac.zip'
         urlretrieve(url, filename)
+        if os.path.getsize(filename) < 1e6:  # too small; download failed - use a backup url
+            url = 'https://eugvas.net/software/agama' + url[url.rfind('/'):]
+            urlretrieve(url, filename)
         if not os.path.isfile(filename):
             raise RuntimeError('Cannot find downloaded file %s' % filename)
         with zipfile.ZipFile(filename, 'r') as f:  # unpack the archive, manually setting the file attributes

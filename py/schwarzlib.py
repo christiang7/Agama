@@ -517,10 +517,11 @@ class DensityDataset:
         for i in range(len(self.cons_val)-1):
             if use[i] and abs(model_dens[i]-self.cons_val[i+1]) > 3*self.cons_err[i+1]:
                 if not header_shown:
-                    print('3d density constraint:                    required        actual   deviation/sigma')
+                    print('3d density constraint:                    required   uncertainty        actual   deviation/sigma')
                     header_shown = True
-                print('%-36s  %12.4g  %12.4g  %8.4f' %
-                (self.target[i], self.cons_val[i+1], model_dens[i], (model_dens[i]-self.cons_val[i+1])/self.cons_err[i+1]))
+                print('%-36s  %12.4g  %12.4g  %12.4g  %8.4f' %
+                (self.target[i], self.cons_val[i+1], self.cons_err[i+1], model_dens[i],
+                    (model_dens[i]-self.cons_val[i+1])/self.cons_err[i+1]))
         return _numpy.sum(dif**2)
 
     def projectedDensity(self, gridx, gridy):
@@ -782,14 +783,14 @@ class KinemDatasetGH:
             _numpy.sum( ((ghm_mod - self.ghm_val) / self.ghm_err)**2, axis=0 )  # array of length M
         ))
 
-    def getGHMoments(self, LOSVD=None, Upsilon=None):
+    def getGHMoments(self, model_losvd=None, Upsilon=None):
         '''
-        Return v,sigma,h3..hM of the observational dataset (if LOSVD is None) or of the model LOSVD
+        Return v,sigma,h3..hM of the observational dataset (if model_losvd is None) or of the model LOSVD
         '''
-        if LOSVD is None:
+        if model_losvd is None:
             return self.ghm_val, self.ghm_err
         else:
-            return _agama.ghMoments(matrix=LOSVD * Upsilon**-0.5,
+            return _agama.ghMoments(matrix=model_losvd * Upsilon**-0.5,
                 gridv=self.mod_gridv * Upsilon**0.5, degree=self.mod_degree, ghorder=6)[:,(1,2,6,7,8,9)]
 
     def getLOSVD(self, gridv):
@@ -909,19 +910,19 @@ class KinemDatasetHist:
         error[use] = ( (cons_mod[use] - self.cons_val[use]) / self.cons_err[use] )**2
         return _numpy.sum(error.reshape(self.num_aper, self.num_cons+1), axis=0)
 
-    def getGHMoments(self, LOSVD=None, Upsilon=None):
+    def getGHMoments(self, model_losvd=None, Upsilon=None):
         '''
-        Compute GH moments from the observed LOSVD (if LOSVD is None) or from the model LOSVD
+        Compute GH moments from the observed LOSVD (if model_losvd is None) or from the model LOSVD
         Return: array of size num_aper x ghorder containing the values  v,sigma,h3..hM  in each aperture
         '''
         ghorder = 6
         ind = (1,2) + tuple(range(6, ghorder+4))  # indices of columns containing v,sigma,h3...hM in the matrix returned by ghMoments
-        if LOSVD is None:
+        if model_losvd is None:
             ghm_val, ghm_err = ghMomentsErrors(degree=self.obs_degree, gridv=self.obs_gridv,
                 values=self.obs_val, errors=self.obs_err, ghorder=ghorder)
             return ghm_val[:,ind], ghm_err[:,ind]
         else:
-            return _agama.ghMoments(matrix=LOSVD * Upsilon**-0.5,
+            return _agama.ghMoments(matrix=model_losvd * Upsilon**-0.5,
                 gridv=self.mod_gridv * Upsilon**0.5, degree=self.mod_degree, ghorder=ghorder)[:,ind]
 
     def getLOSVD(self, gridv):
@@ -938,7 +939,7 @@ class KinemDatasetHist:
 
 
 
-def runModel(datasets, potential, ic, Omega=0, intTime=100.0,
+def runModel(datasets, potential, ic, Omega=0, intTime=100.0, method='dop853', accuracy=1e-6,
     Upsilon=1.0, regul=1.0, multstep=2**(1./10), deltaChi2=100.0,
     filePrefix='', linePrefix='', fileResult='results.dat', nbody=False, nbodyFormat='text'):
     '''
@@ -950,6 +951,8 @@ def runModel(datasets, potential, ic, Omega=0, intTime=100.0,
       ic:         initial conditions for the orbits (Nx6 array).
       Omega:      pattern speed (default 0).
       intTime:    integration time in units of dynamical time of each orbit (default 100).
+      method:     choice of ODE integration method (default 'dop853', alternative 'dprkn8').
+      accuracy:   parameter controlling orbit integration accuracy (default 1e-6).
       regul:      regularization parameter for the solution (default 1.0).
       Upsilon:    initial value of M/L for the search (default 1.0).
       multstep:   multiplicative increment/decrement for Upsilon during the search (default 2**0.1).
@@ -983,7 +986,7 @@ def runModel(datasets, potential, ic, Omega=0, intTime=100.0,
     # otherwise just as a relatively small array of equally-sampled points used to compute orbit properties
     dtype = object if nbody else _numpy.float32
     trajsize = 0 if nbody else 100
-    matrices = _agama.orbit(potential=potential, ic=ic, time=inttime, Omega=Omega,
+    matrices = _agama.orbit(potential=potential, ic=ic, time=inttime, Omega=Omega, method=method, accuracy=accuracy,
         targets=[d.target for d in datasets], dtype=dtype, trajsize=trajsize, separateTime=True)
     trajs    = matrices[-1]   # list of orbit trajectories
     matrices = matrices[:len(datasets)]  # matrices corresponding to datasets
@@ -1080,15 +1083,23 @@ def runModel(datasets, potential, ic, Omega=0, intTime=100.0,
         print('Penalty for regularization: %7.2f;  entropy: %.3g;  # of useful orbits: %i / %i' %
             (penReg, entropy, numUsed, numOrbits))
 
-        # workaround for newer versions of numpy, which refuse to save a "ragged" (non-rectangular) array
-        # unless its dtype is explicitly set to "object"
-        LOSVD_list = archive['LOSVD']
-        archive['LOSVD'] = _numpy.array(LOSVD_list, dtype=object)
+        # workaround for newer versions of numpy, which refuse to save a "ragged" (non-rectangular)
+        # array unless its dtype is explicitly set to "object".
+        # The resulting 2d array will have shape (num_kinematic_datasets, num_Upsilon_values),
+        # and each element is also a 2d array of shape (ds[i].num_aper, ds[i].num_bsplines).
+        # This is not needed if there is only one dataset, or if all of them have the same num_aper:
+        # in this case, "dtype=object" would actually be harmful - it will create a big 4d array
+        # but convert its elements from floats to objects, which we don't want.
+        LOSVD_list = archive['LOSVD']  # keep the original list of lists
+        try:  # convert it to array for saving
+            archive['LOSVD'] = _numpy.array(LOSVD_list)
+        except ValueError:
+            archive['LOSVD'] = _numpy.array(LOSVD_list, dtype=object)
 
         # write out the data collected for all values of Upsilon
         _numpy.savez_compressed(filePrefix, **archive)
 
-        archive['LOSVD'] = LOSVD_list
+        archive['LOSVD'] = LOSVD_list  # restore the original list of lists for further expansion
 
         # append results to the summary file
         with open(fileResult, 'a') as fileout:
@@ -1210,11 +1221,7 @@ def runPlot(datasets,                           # list of [kinematic] datasets t
                     # rescale the default velocity grid and the B-spline amplitudes to the current Upsilon
                     this.mod_gridv = ds.mod_gridv * Upsilon**0.5
                     los_mod.append(LOSVD[indexKinemDataset][archiveIndex] * Upsilon**-0.5)
-                    if hasattr(ds, 'getGHMoments'):
-                        ghm_mod.append(ds.getGHMoments(LOSVD[indexKinemDataset][archiveIndex], Upsilon))
-                    else:
-                        ghm_mod.append(_agama.ghMoments(matrix=LOSVD[indexKinemDataset][archiveIndex] * Upsilon**-0.5,
-                            gridv=ds.mod_gridv * Upsilon**0.5, degree=ds.mod_degree, ghorder=6)[:,(1,2,6,7,8,9)])
+                    ghm_mod.append(ds.getGHMoments(LOSVD[indexKinemDataset][archiveIndex], Upsilon))
                     indexKinemDataset += 1
                     num_aper.append(num_aper[-1] + len(ds.target_params['apertures']))
             this.los_mod = _numpy.vstack(los_mod)
@@ -1431,8 +1438,6 @@ def runPlot(datasets,                           # list of [kinematic] datasets t
 
     # parse and combine all kinematic datasets
     apertures = []
-    obs_degree= []
-    obs_gridv = []
     ghm_val   = []
     ghm_err   = []
     for d in datasets:  # loop over kinematic datasets only
@@ -1486,12 +1491,12 @@ def runPlot(datasets,                           # list of [kinematic] datasets t
     if v0err    is None: v0err   = max(ghm_err[:,0])
     if sigmaerr is None: sigmaerr= max(ghm_err[:,1])
     panel_params = [
-        dict(title=r'$v_0$',   data_range=v0lim,   error_range=v0err,   extent=[0.24, 0.59, 0.165, 0.40]),
-        dict(title=r'$\sigma$',data_range=sigmalim,error_range=sigmaerr,extent=[0.24, 0.09, 0.165, 0.40]),
-        dict(title=r'$h_3$',   data_range=hlim,    error_range=herr,    extent=[0.43, 0.59, 0.165, 0.40]),
-        dict(title=r'$h_4$',   data_range=hlim,    error_range=herr,    extent=[0.43, 0.09, 0.165, 0.40]),
-        dict(title=r'$h_5$',   data_range=hlim,    error_range=herr,    extent=[0.62, 0.59, 0.165, 0.40]),
-        dict(title=r'$h_6$',   data_range=hlim,    error_range=herr,    extent=[0.62, 0.09, 0.165, 0.40]),
+        dict(title=r'$v_0$',      data_range=v0lim,   error_range=v0err,   extent=[0.24, 0.59, 0.165, 0.40]),
+        dict(title=r'$\varsigma$',data_range=sigmalim,error_range=sigmaerr,extent=[0.24, 0.09, 0.165, 0.40]),
+        dict(title=r'$h_3$',      data_range=hlim,    error_range=herr,    extent=[0.43, 0.59, 0.165, 0.40]),
+        dict(title=r'$h_4$',      data_range=hlim,    error_range=herr,    extent=[0.43, 0.09, 0.165, 0.40]),
+        dict(title=r'$h_5$',      data_range=hlim,    error_range=herr,    extent=[0.62, 0.59, 0.165, 0.40]),
+        dict(title=r'$h_6$',      data_range=hlim,    error_range=herr,    extent=[0.62, 0.09, 0.165, 0.40]),
     ]
 
     ##### four buttons determining which map to display #####

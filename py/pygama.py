@@ -53,7 +53,7 @@ getUnits.__doc__ = _getUnits.__doc__ + \
 def CubicSpline(*args, **kwargs):
     """Deprecated alias for agama.Spline"""
     import warnings
-    warnings.warn("CubicSpline has been renamed to Spline", DeprecationWarning, 2)
+    warnings.warn("CubicSpline has been renamed to Spline, and this alias will be removed in a future version", FutureWarning, 2)
     return _agama.Spline(*args, **kwargs)
 
 

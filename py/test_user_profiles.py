@@ -158,7 +158,7 @@ def MySF(x):
     return (x[:,0]-0)**2 + (x[:,1]-1)**2 + (x[:,2]-2)**2 < 3**2
 
 # same concept implemented by a built-in C++ object accessible via the Python interface
-sf_orig = agama.SelectionFunction(point=(0,1,2), radius=3)
+sf_orig = agama.SelectionFunction(point=(0,1,2), rcut=3)
 
 # test the equivalence of the two selection functions by computing the integral of DF * SF
 # or sampling this product in a restricted spatial region

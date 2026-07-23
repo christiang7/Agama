@@ -66,7 +66,7 @@
 #include "utils.h"
 #include "utils_config.h"
 // text string embedded into the python module as the __version__ attribute (including Github commit number)
-#define AGAMA_VERSION "1.0.159 compiled on " __DATE__
+#define AGAMA_VERSION "1.0.160 compiled on " __DATE__
 
 // older versions of numpy have different macro names
 // (will need to expand this list if other similar macros are used in the code)
@@ -107,22 +107,6 @@ namespace pygama {  // internal namespace
 
 PyObject* thismodule;  // PyObject corresponding to this extension module
 
-// some forward declarations:
-// pointers to several Python type descriptors, which will be initialized at module startup
-static PyTypeObject
-    *DensityTypePtr,
-    *PotentialTypePtr,
-    *ActionFinderTypePtr,
-    *ActionMapperTypePtr,
-    *DistributionFunctionTypePtr,
-    *SelectionFunctionTypePtr,
-    *TargetTypePtr,
-    *SplineTypePtr,
-    *OrbitTypePtr;
-
-// forward declaration for a routine that constructs a Python cubic spline object
-PyObject* createCubicSpline(const std::vector<double>& x, const std::vector<double>& y);
-
 // an annoying feature in Python C API is the use of different types to refer to the same object,
 // which triggers a warning about breaking strict aliasing rules, unless compiled
 // with -fno-strict-aliasing. To avoid this, we use a dirty typecast.
@@ -162,6 +146,42 @@ typedef PyRef<PyObject> PyObjectRef;
 typedef PyRef<PyArrayObject> PyArrayObjectRef;
 
 
+//  -------------------------------------------------
+/// \name  Forward declarations of types and routines
+//  -------------------------------------------------
+///@{
+
+// pointers to several Python type descriptors, which will be initialized at module startup
+static PyTypeObject
+    *DensityTypePtr,
+    *PotentialTypePtr,
+    *ActionFinderTypePtr,
+    *ActionMapperTypePtr,
+    *DistributionFunctionTypePtr,
+    *SelectionFunctionTypePtr,
+    *TargetTypePtr,
+    *SplineTypePtr,
+    *OrbitTypePtr;
+
+// construct a Python cubic spline object
+PyObject* createCubicSpline(const std::vector<double>& x, const std::vector<double>& y);
+
+/// extract a pointer to C++ Density class from a Python object
+potential::PtrDensity getDensity(PyObject* dens_obj, utils::KeyValueMap* params = NULL);
+
+// extract a pointer to C++ Potential class from a Python object
+potential::PtrPotential getPotential(PyObject* pot_obj, utils::KeyValueMap* params = NULL);
+
+// extract a pointer to C++ SelectionFunction class from a Python object
+galaxymodel::PtrSelectionFunction getSelectionFunction(PyObject* sf_obj);
+
+/// create a Python Density object and initialize it with an existing instance of C++ density class
+PyObject* createDensityObject(const potential::PtrDensity& dens);
+
+// create a Python Potential object and initialize it with an existing instance of C++ potential class
+PyObject* createPotentialObject(const potential::PtrPotential& pot);
+
+///@}
 //  -------------------------------
 /// \name  Multi-threading support
 //  -------------------------------
@@ -1819,18 +1839,6 @@ void Density_dealloc(DensityObject* self)
     Py_TYPE(self)->tp_free(self);
 }
 
-/// extract a pointer to C++ Density class from a Python object, or return an empty pointer on error
-// (forward declaration, the function will be defined later)
-potential::PtrDensity getDensity(PyObject* dens_obj, utils::KeyValueMap* params = NULL);
-
-// extract a pointer to C++ Potential class from a Python object, or return an empty pointer on error
-// (forward declaration, the function will be defined later)
-potential::PtrPotential getPotential(PyObject* pot_obj, utils::KeyValueMap* params = NULL);
-
-// create a Python Potential object and initialize it with an existing instance of C++ potential class
-// (forward declaration, the function will come later)
-PyObject* createPotentialObject(const potential::PtrPotential& pot);
-
 /// create a Python Density object and initialize it with an existing instance of C++ density class
 PyObject* createDensityObject(const potential::PtrDensity& dens)
 {
@@ -2490,10 +2498,10 @@ static PyMethodDef Density_methods[] = {
       "a 2d array of size Nx3 (in case of positions only) or Nx6 (in case of velocity assignment), "
       "and a 1d array of N point masses." },
     { "totalMass", (PyCFunction)Density_totalMass, METH_NOARGS,
-      "Return the total mass of the density model.\n"
+      "Compute the total mass of the density model.\n"
       "Returns: float number" },
     { "enclosedMass", Density_enclosedMass, METH_VARARGS,
-      "Return the estimate of the mass enclosed within a given radius or a list of radii.\n"
+      "Estimate the mass enclosed within a given radius or a list of radii.\n"
       "Depending on the density type, it may be obtained by a direct integration over the 3d volume, "
       "or by faster but more approximate methods.\n"
       "Returns: a single float number or an array of numbers" },
@@ -4526,22 +4534,26 @@ static const char* docstringSelectionFunction =
     "SelectionFunction class represents an arbitrary function of 6 Cartesian phase-space coordinates "
     "S(x,v) that can be passed to the GalaxyModel class and provides a multiplicative factor "
     "in various integrals computed by its methods.\n"
-    "The only currently available variant is a function that depends exponentially on the distance "
-    "from a given point x0, normalized by a cutoff radius R0 with a steepness parameter xi: \n"
-    "  S(x) = exp[ -(|x-x0| / R0)^xi ]\n"
+    "The only currently available variant is the following function that depends on the distance "
+    "from a given point x0:\n"
+    "  S(x) = exp[ -(|x-x0| / rcut)^xi ] / [1 + (|x-x0|/r0)^gamma]\n"
     "Arguments for the constructor:\n"
     "  point  -- an array of 3 Cartesian coordinates of the point x0;\n"
-    "  radius -- cutoff radius R0 (must be positive; infinity means no cutoff - S=1 everywhere;\n"
-    "  steepness -- cutoff steepness xi, ranges from 0 (no cutoff) to infinity (default value, "
-    "means a sharp transition from S=1 below the cutoff to S=0 above it).\n";
+    "  rcut -- radius of the exponential cutoff "
+    "(must be positive; default value of infinity means no such cutoff).\n"
+    "  xi -- cutoff steepness, ranges from 0 (no cutoff) to infinity (default value, "
+    "means a sharp transition from S=1 below the cutoff to S=0 above it).\n"
+    "  r0 -- radius of the power-law multiplicative factor "
+    "(must be positive, default value of infinity means no power-law factor).\n"
+    "  gamma -- exponent in the power-law factor; can have any sign (default value is 1; "
+    "positive/negative gamma means suppression at large/small distances respectively).";
 
 /// \cond INTERNAL_DOCS
-typedef shared_ptr<const galaxymodel::BaseSelectionFunction> PtrSelectionFunction;
 
 /// Python type corresponding to SelectionFunction class
 typedef struct {
     PyObject_HEAD
-    PtrSelectionFunction sf;
+    galaxymodel::PtrSelectionFunction sf;
 } SelectionFunctionObject;
 /// \endcond
 
@@ -4562,10 +4574,10 @@ int SelectionFunction_init(SelectionFunctionObject* self, PyObject* args, PyObje
         return -1;
     }
     PyObject* point_obj = NULL;
-    double radius = NAN, steepness = INFINITY;
-    static const char* keywords[] = {"point", "radius", "steepness", NULL};
-    if(!PyArg_ParseTupleAndKeywords(args, namedArgs, "Od|d", const_cast<char **>(keywords),
-        &point_obj, &radius, &steepness))
+    double rcut = INFINITY, xi = INFINITY, r0 = INFINITY, gamma = 1;
+    static const char* keywords[] = {"point", "rcut", "xi", "r0", "gamma", NULL};
+    if(!PyArg_ParseTupleAndKeywords(args, namedArgs, "O|dddd", const_cast<char **>(keywords),
+        &point_obj, &rcut, &xi, &r0, &gamma))
     {
         return -1;
     }
@@ -4577,7 +4589,7 @@ int SelectionFunction_init(SelectionFunctionObject* self, PyObject* args, PyObje
     }
     try{
         self->sf.reset(new galaxymodel::SelectionFunctionDistance(
-            convertPos(&point[0]), radius * conv->lengthUnit, steepness));
+            convertPos(&point[0]), rcut * conv->lengthUnit, xi, r0 * conv->lengthUnit, gamma));
         assert(self->sf);
         FILTERMSG(utils::VL_DEBUG, "Agama",
             "Created a SelectionFunction at "+utils::toString(self->sf.get()));
@@ -4682,14 +4694,17 @@ public:
 };
 
 // helper function for creating an instance of C++ BaseSelectionFunction class from a Python object
-PtrSelectionFunction getSelectionFunction(PyObject* sf_obj)
+galaxymodel::PtrSelectionFunction getSelectionFunction(PyObject* sf_obj)
 {
     if(sf_obj == Py_None || sf_obj == NULL)
-        return PtrSelectionFunction(new galaxymodel::SelectionFunctionTrivial());
+        return galaxymodel::PtrSelectionFunction(new galaxymodel::SelectionFunctionTrivial());
     else if(PyObject_TypeCheck(sf_obj, SelectionFunctionTypePtr) && ((SelectionFunctionObject*)sf_obj)->sf)
         return ((SelectionFunctionObject*)sf_obj)->sf;
-    else // otherwise it must be a callable Python function accessed through a wrapper class
-        return PtrSelectionFunction(new SelectionFunctionWrapper(sf_obj));
+    else if(checkCallable(sf_obj, /*dimensions of input*/ 6))
+        // otherwise it must be a callable Python function accessed through a wrapper class
+        return galaxymodel::PtrSelectionFunction(new SelectionFunctionWrapper(sf_obj));
+    else  // if the above check failed, return empty pointer as a sign of error
+        return galaxymodel::PtrSelectionFunction();
 }
 
 static PyMethodDef SelectionFunction_methods[] = {
@@ -4863,7 +4878,7 @@ PyObject* GalaxyModel_totalMass(GalaxyModelObject* self, PyObject* args, PyObjec
         &separate_flag))
         return NULL;
     bool separate = toBool(separate_flag, false);
-    PtrSelectionFunction selFunc(getSelectionFunction(self->sf_obj));
+    galaxymodel::PtrSelectionFunction selFunc(getSelectionFunction(self->sf_obj));
     const galaxymodel::GalaxyModel model(
         *self->pot_obj->pot, *self->af_obj->af, *self->df_obj->df, *selFunc);
     int numVal = separate? model.distrFunc.numValues() : 1;
@@ -4898,7 +4913,7 @@ PyObject* GalaxyModel_sample_posvel(GalaxyModelObject* self, PyObject* args, PyO
     try{
         particles::ParticleArrayCar points;
         // temporary wrapper object for the selection function (or a trivial one if not provided)
-        PtrSelectionFunction selfnc = getSelectionFunction(self->sf_obj);
+        galaxymodel::PtrSelectionFunction selfnc = getSelectionFunction(self->sf_obj);
 
         // do the sampling while releasing GIL, since the sampling routine is OpenMP-parallelized
         // and may call back user-defined Python functions from multiple threads simultaneously,
@@ -4929,7 +4944,7 @@ PyObject* GalaxyModel_sample_posvel(GalaxyModelObject* self, PyObject* args, PyO
 
 /// compute moments of DF at a given 2d or 3d point
 class FncGalaxyModelMoments: public BatchFunction {
-    PtrSelectionFunction selFunc;                 // selection function
+    galaxymodel::PtrSelectionFunction selFunc;    // selection function
     const galaxymodel::GalaxyModel model;         // potential + df + action finder + sel.fnc.
     bool separate;                                // whether to consider each DF component separately
     unsigned int numComponents;                   // df.numValues() if separate, otherwise 1
@@ -5049,12 +5064,12 @@ PyObject* GalaxyModel_moments(GalaxyModelObject* self, PyObject* args, PyObject*
 
 /// compute projected distribution function
 class FncGalaxyModelProjectedDF: public BatchFunction {
-    PtrSelectionFunction selFunc;            // selection function
-    const galaxymodel::GalaxyModel model;    // potential + df + action finder + sel.fnc.
-    bool separate;                           // whether to consider each DF component separately
-    unsigned int numComponents;              // df.numValues() if separate, otherwise 1
-    std::vector<double> alpha, beta, gamma;  // conversion between observed and intrinsic coords
-    double* outputBuffer;                    // raw buffer for output values
+    galaxymodel::PtrSelectionFunction selFunc;  // selection function
+    const galaxymodel::GalaxyModel model;       // potential + df + action finder + sel.fnc.
+    bool separate;                              // whether to consider each DF component separately
+    unsigned int numComponents;                 // df.numValues() if separate, otherwise 1
+    std::vector<double> alpha, beta, gamma;     // conversion between observed and intrinsic coords
+    double* outputBuffer;                       // raw buffer for output values
 public:
     FncGalaxyModelProjectedDF(PyObject* input, PyObject* namedArgs, GalaxyModelObject* model_obj) :
         BatchFunction(input, /*inputLength*/ 8, 8,
@@ -5119,7 +5134,7 @@ PyObject* GalaxyModel_projectedDF(GalaxyModelObject* self, PyObject* args, PyObj
 /// compute velocity distribution functions at point(s)
 class FncGalaxyModelVDF: public BatchFunction {
     static const int SIZEGRIDV = 50;      // default size of the velocity grid
-    PtrSelectionFunction selFunc;         // selection function
+    galaxymodel::PtrSelectionFunction selFunc;  // selection function
     const galaxymodel::GalaxyModel model; // potential + df + action finder + sel.fnc.
     bool separate;                        // whether to consider each DF component separately
     unsigned int numComponents;           // df.numValues() if separate, otherwise 1
@@ -7033,7 +7048,8 @@ static const char* docstringTarget =
     "and the radial dependence of each term is a linearly-interpolated function.\n"
     "Parameters:\n"
     "gridr - array of radial grid nodes;\n"
-    "lmax, mmax - order of angular expansion in theta and phi, respectively.\n\n"
+    "lmax, mmax - order of angular expansion in theta and phi, respectively;\n"
+    "axisRatioY, axisRatioZ - (optional) same meaning as for DensityClassic.\n\n"
     "  DensityCylindricalTopHat\n"
     "A grid in meridional plane (R,z) aligned with cylindrical coordinates, "
     "with the azimuthal dependence of the density represented by a Fourier expansion; "
@@ -7202,10 +7218,14 @@ int Target_init(TargetObject* self, PyObject* args, PyObject* namedArgs)
                     self->target.reset(new galaxymodel::TargetDensityClassic<1>(
                         stripsPerPane, gridr, axisRatioY, axisRatioZ));
             } else if(utils::stringsEqual(type_str, "DensitySphHarm")) {
+                double  // flattening of the spheroidal grid
+                    axisRatioY = toDouble(nargs.pop("axisRatioY"), 1.0),
+                    axisRatioZ = toDouble(nargs.pop("axisRatioZ"), 1.0);
                 // orders of angular expansion or number of lines partitioning a spherical shell into cells
                 int lmax = toInt(nargs.pop("lmax"), 0),
                     mmax = toInt(nargs.pop("mmax"), 0);
-                self->target.reset(new galaxymodel::TargetDensitySphHarm(lmax, mmax, gridr));
+                self->target.reset(new galaxymodel::TargetDensitySphHarm(
+                    lmax, mmax, gridr, axisRatioY, axisRatioZ));
             } else if(utils::stringsEqual(type_str, "DensityCylindricalTopHat") ||
                       utils::stringsEqual(type_str, "DensityCylindricalLinear"))
             {

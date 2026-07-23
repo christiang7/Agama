@@ -80,13 +80,13 @@ bool testGH()
     std::cout << "param\ttrue_value\tfree_basis\tdifference\tfixed_basis\tdifference\n";
 
     std::cout << "Test 0: rectangle block\n";
-    std::vector<double> grid0(2);
-    grid0[0] = -0.5 * SIZE;
-    grid0[1] =  0.5 * SIZE;
-    std::vector<double> ampl0(1, 1.0 * AMPL / SIZE);
+    // function is constant, but we split it into many smaller segments to test the error accumulation
+    const size_t NSEGMENTS0 = 100;
+    std::vector<double> grid0 = math::createUniformGrid(NSEGMENTS0+1, -0.5*SIZE, 0.5*SIZE);
+    std::vector<double> ampl0(NSEGMENTS0, 1.0 * AMPL / SIZE);
     // first approach: construct the matrix for converting the amplitudes of B-spline expansion
     // into GH coefficients, using a fixed GH basis (true parameters of the best-fit Gaussian)
-    math::Matrix<double> ghmat0 = math::computeGaussHermiteMatrix(0, grid0, GHORDER,
+    math::Matrix<double> ghmat0 = math::computeGaussHermiteMatrix(/*degree*/ 0, grid0, GHORDER,
         GHBASIS0[0] * AMPL, GHBASIS0[1] * SIZE, GHBASIS0[2] * SIZE);
     // second approach: find the parameters of the best-fit Gaussian and then compute the GH coefs
     // using a different function; this tests both the Gaussian fitting and the computation of
@@ -105,26 +105,32 @@ bool testGH()
     std::cout << "width\t"     + str(GHBASIS0[2]) + '\t' +
         str(ghexp0.width()  / SIZE              ) + '\t' +
         str(ghexp0.width()  / SIZE - GHBASIS0[2]) + '\n';
+    std::vector<double> hfix0(ghmat0.rows());
+    math::blas_dgemv(math::CblasNoTrans, 1, ghmat0, ampl0, 0, hfix0);
     for(int i=0; i<=GHORDER; i++) {
-        double hfix = ghmat0(i, 0) * ampl0[0], hfree = ghexp0.coefs()[i];
+        double hfix = hfix0[i], hfree = ghexp0.coefs()[i];
         std::cout << 'h' + utils::toString(i) + '\t' + str(GHCOEFS0[i]) + '\t' +
             str(hfree) + '\t' + str(hfree - GHCOEFS0[i]) + '\t' +
             str(hfix)  + '\t' + str(hfix  - GHCOEFS0[i]) + '\n';
         dif0free = std::max(dif0free, fabs(hfree - GHCOEFS0[i]));
         dif0fix  = std::max(dif0fix,  fabs(hfix  - GHCOEFS0[i]));
     }
-    bool ok0 = dif0fix < 1e-12 && dif0free < 1e-12;
+    bool ok0 = dif0fix < 1e-14 && dif0free < 1e-14;
     std::cout << "Max error with freely-fitted basis:     " + str(dif0free) +
         ",\tfixed basis:    " + str(dif0fix) + (ok0 ? "" : err) + '\n';
 
     std::cout << "Test 1: skewed sawtooth function\n";
-    std::vector<double> grid1(3);
-    grid1[0] = -1.0 * SIZE;
-    grid1[1] =  0.5 * SIZE;
-    grid1[2] =  1.0 * SIZE;
-    std::vector<double> ampl1(3);
-    ampl1[1] = 1.0 * AMPL / SIZE;
-    math::Matrix<double> ghmat1 = math::computeGaussHermiteMatrix(1, grid1, GHORDER,
+    // same here, instead of using only two segments, split each into many smaller ones
+    // to check that the roundoff error accumulation is under control
+    const size_t NSEGMENTS1 = 100;
+    std::vector<double> grid1(2*NSEGMENTS1+1), ampl1(2*NSEGMENTS1+1);
+    for(size_t k=0; k<=NSEGMENTS1; k++) {
+        ampl1[k] = AMPL / SIZE * k / NSEGMENTS1;
+        grid1[k] = (-1.0 + 1.5 * k / NSEGMENTS1) * SIZE;
+        ampl1[k + NSEGMENTS1] = AMPL / SIZE * (NSEGMENTS1 - k) / NSEGMENTS1;
+        grid1[k + NSEGMENTS1] = (0.5 + 0.5 * k / NSEGMENTS1) * SIZE;
+    }
+    math::Matrix<double> ghmat1 = math::computeGaussHermiteMatrix(/*degree*/ 1, grid1, GHORDER,
         GHBASIS1[0] * AMPL, GHBASIS1[1] * SIZE, GHBASIS1[2] * SIZE);
     math::GaussHermiteExpansion ghexp1(math::BsplineWrapper<1>(grid1, ampl1), GHORDER);
     double dif1fix = 0, dif1free = std::max(
@@ -140,19 +146,21 @@ bool testGH()
     std::cout << "width\t"     + str(GHBASIS1[2]) + '\t' +
         str(ghexp1.width()  / SIZE              ) + '\t' +
         str(ghexp1.width()  / SIZE - GHBASIS1[2]) + '\n';
+    std::vector<double> hfix1(ghmat1.rows());
+    math::blas_dgemv(math::CblasNoTrans, 1, ghmat1, ampl1, 0, hfix1);
     for(int i=0; i<=GHORDER; i++) {
-        double hfix = ghmat1(i, 1) * ampl1[1], hfree = ghexp1.coefs()[i];
+        double hfix = hfix1[i], hfree = ghexp1.coefs()[i];
         std::cout << 'h' + utils::toString(i) + '\t' + str(GHCOEFS1[i]) + '\t' +
             str(hfree) + '\t' + str(hfree - GHCOEFS1[i]) + '\t' +
             str(hfix)  + '\t' + str(hfix  - GHCOEFS1[i]) + '\n';
         dif1free = std::max(dif1free, fabs(hfree - GHCOEFS1[i]));
         dif1fix  = std::max(dif1fix,  fabs(hfix  - GHCOEFS1[i]));
     }
-    bool ok1 = dif1fix < 1e-12 && dif1free < 1e-12;
+    bool ok1 = dif1fix < 1e-13 && dif1free < 1e-13;
     std::cout << "Max error with freely-fitted basis:     " + str(dif1free) +
         ",\tfixed basis:    " + str(dif1fix) + (ok1 ? "" : err) + '\n';
 
-    std::cout << "Test 2: bell-shaped function\n";
+    std::cout << "Test 2: bell-shaped function with infinite support\n";
     // first approach: fix the parameters of the base Gaussian to the true values
     math::GaussHermiteExpansion ghexp2fix (BellCurve(), GHORDER,
         GHBASIS2[0] * AMPL, GHBASIS2[1] * SIZE, GHBASIS2[2] * SIZE);
@@ -179,6 +187,8 @@ bool testGH()
         dif2free = std::max(dif2free, fabs(hfree - GHCOEFS2[i]));
         dif2fix  = std::max(dif2fix,  fabs(hfix  - GHCOEFS2[i]));
     }
+    // here the coefficients are not computed analytically, but rather approximated
+    // using numerical integration over the infinite domain, so the errors are considerably larger
     bool ok2 = dif2fix < 1e-6 && dif2free < 1e-4;
     std::cout << "Max error with freely-fitted basis:     " + str(dif2free) +
         ",\tfixed basis:    " + str(dif2fix) + (ok2 ? "" : err) + '\n';
